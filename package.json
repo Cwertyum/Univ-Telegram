@@ -1,0 +1,14 @@
+{
+  "name": "universal-auth-telegram-bot",
+  "version": "1.0.0",
+  "description": "Standalone Telegram Bot Plugin for UniversalAuth Minecraft 2FA & Management",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "telegraf": "^4.16.3"
+  }
+}
