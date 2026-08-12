@@ -149,6 +149,19 @@ export function startTelegramBridge(botInstance) {
 
 export function sendCommandToPlugin(commandType, data) {
   pendingPluginCommands.push({ type: commandType, data, timestamp: Date.now() });
+
+  const mcHost = process.env.MC_SERVER_HOST || '127.0.0.1';
+  const mcPort = process.env.MC_SERVER_PORT || '3003';
+  try {
+    const req = http.request(`http://${mcHost}:${mcPort}/api/mc-command`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      timeout: 1500
+    });
+    req.on('error', () => {});
+    req.write(JSON.stringify({ type: commandType, data }));
+    req.end();
+  } catch {}
 }
 
 export function getPending2FARequest(requestId) {
