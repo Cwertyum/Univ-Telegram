@@ -7,111 +7,155 @@ function hashPassword(password, salt = 'UniversalAuthSalt2026') {
   return '$SHA$' + salt + '$' + crypto.createHash('sha256').update(password + salt).digest('hex');
 }
 
+/**
+ * Helper to resolve target player and check permissions:
+ * - Regular Telegram user: Can ONLY manage their OWN linked Minecraft account!
+ * - Telegram Admin (listed in TG_ADMIN_IDS): Can manage ANY player.
+ */
+function resolveTargetPlayer(ctx, inputUsername) {
+  const telegramId = String(ctx.from.id);
+  const linkedPlayer = tgDb.getAuthPlayerByTelegramId(telegramId);
+  const adminIdsStr = process.env.TELEGRAM_ADMIN_IDS || '';
+  const adminIds = adminIdsStr.split(',').map(id => id.trim()).filter(Boolean);
+  const isAdmin = adminIds.includes(telegramId);
+
+  if (!inputUsername || inputUsername.trim().length === 0) {
+    if (!linkedPlayer) {
+      return { error: 'ℹ️ *К вашему Telegram аккаунту не привязан ни один профиль Minecraft.* Введите `/2fa` в игре и привяжите код через `/activate <код>`.' };
+    }
+    return { player: linkedPlayer, targetUsername: linkedPlayer.username, isSelf: true };
+  }
+
+  const cleanInput = inputUsername.trim().toLowerCase();
+
+  if (linkedPlayer && linkedPlayer.username.toLowerCase() === cleanInput) {
+    return { player: linkedPlayer, targetUsername: linkedPlayer.username, isSelf: true };
+  }
+
+  if (!isAdmin) {
+    return { error: '⛔ *Ошибка доступа!* Вы можете управлять (кикать, замораживать, менять пароль) только *своим собственным аккаунтом Minecraft*!' };
+  }
+
+  const foundPlayer = tgDb.getAuthPlayer(cleanInput) || { username: cleanInput, display_name: inputUsername.trim() };
+  return { player: foundPlayer, targetUsername: cleanInput, isSelf: false };
+}
+
 export function registerAdminCommands(bot) {
-  // 1. /mc_freeze <player> [reason]
+  // 1. /mc_freeze [player] [reason]
   bot.command('mc_freeze', async (ctx) => {
     const parts = ctx.message.text.trim().split(/\s+/);
-    if (parts.length < 2) {
-      return ctx.reply('⚠️ Использование: /mc_freeze <никнейм> [причина]');
+    const inputPlayer = parts[1] && !parts[1].startsWith('/') ? parts[1].trim() : null;
+    const reason = inputPlayer ? (parts.slice(2).join(' ') || 'Заморожен через Telegram') : (parts.slice(1).join(' ') || 'Заморожено владельцем через Telegram');
+
+    const res = resolveTargetPlayer(ctx, inputPlayer);
+    if (res.error) {
+      return ctx.replyWithMarkdown(res.error);
     }
 
-    const targetUsername = parts[1].trim();
-    const reason = parts.slice(2).join(' ') || 'Заморожен администратором через Telegram';
-
-    const player = tgDb.getAuthPlayer(targetUsername) || { username: targetUsername.toLowerCase(), display_name: targetUsername };
+    const player = res.player;
     player.is_frozen = true;
     tgDb.saveAuthPlayer(player);
 
     sendCommandToPlugin('FREEZE_PLAYER', { username: player.username, reason });
 
-    await ctx.reply(`❄️ *АККАУНТ ЗАМОРОЖЕН*\n\nИгрок: *${player.display_name}*\nПричина: _${reason}_\nВход на сервер заблокирован.`, { parse_mode: 'Markdown' });
+    const message = res.isSelf
+      ? `❄️ *ВАШ АККАУНТ ЗАМОРОЖЕН*\n\nВы успешно заморозили свой аккаунт *${player.display_name}*. Вход в игру временно заблокирован.`
+      : `❄️ *АККАУНТ ЗАМОРОЖЕН АДМИНАМИ*\n\nИгрок: *${player.display_name}*\nПричина: _${reason}_`;
+
+    await ctx.replyWithMarkdown(message);
   });
 
-  // 2. /mc_unfreeze <player>
+  // 2. /mc_unfreeze [player]
   bot.command('mc_unfreeze', async (ctx) => {
     const parts = ctx.message.text.trim().split(/\s+/);
-    if (parts.length < 2) {
-      return ctx.reply('⚠️ Использование: /mc_unfreeze <никнейм>');
+    const inputPlayer = parts[1] && !parts[1].startsWith('/') ? parts[1].trim() : null;
+
+    const res = resolveTargetPlayer(ctx, inputPlayer);
+    if (res.error) {
+      return ctx.replyWithMarkdown(res.error);
     }
 
-    const targetUsername = parts[1].trim();
-    const player = tgDb.getAuthPlayer(targetUsername);
-
-    if (!player) {
-      return ctx.reply(`❌ Игрок *${targetUsername}* не найден в базе данных.`, { parse_mode: 'Markdown' });
-    }
-
+    const player = res.player;
     player.is_frozen = false;
     tgDb.saveAuthPlayer(player);
 
     sendCommandToPlugin('UNFREEZE_PLAYER', { username: player.username });
 
-    await ctx.reply(`🔥 *АККАУНТ РАЗМОРОЖЕН*\n\nИгрок: *${player.display_name}*\nВход на сервер разрешен.`, { parse_mode: 'Markdown' });
+    const message = res.isSelf
+      ? `🔥 *ВАШ АККАУНТ РАЗМОРОЖЕН*\n\nВы успешно разморозили свой аккаунт *${player.display_name}*. Теперь вы снова можете входить на сервер.`
+      : `🔥 *АККАУНТ РАЗМОРОЖЕН АДМИНАМИ*\n\nИгрок: *${player.display_name}*`;
+
+    await ctx.replyWithMarkdown(message);
   });
 
-  // 3. /mc_kick <player> [reason]
+  // 3. /mc_kick [player] [reason]
   bot.command('mc_kick', async (ctx) => {
     const parts = ctx.message.text.trim().split(/\s+/);
-    if (parts.length < 2) {
-      return ctx.reply('⚠️ Использование: /mc_kick <никнейм> [причина]');
+    const inputPlayer = parts[1] && !parts[1].startsWith('/') ? parts[1].trim() : null;
+    const reason = inputPlayer ? (parts.slice(2).join(' ') || 'Кикнут через Telegram') : 'Кик по запросу владельца через Telegram';
+
+    const res = resolveTargetPlayer(ctx, inputPlayer);
+    if (res.error) {
+      return ctx.replyWithMarkdown(res.error);
     }
 
-    const targetUsername = parts[1].trim();
-    const reason = parts.slice(2).join(' ') || 'Кикнут администратором через Telegram';
+    sendCommandToPlugin('KICK_PLAYER', { username: res.targetUsername, reason });
 
-    sendCommandToPlugin('KICK_PLAYER', { username: targetUsername, reason });
+    const message = res.isSelf
+      ? `👢 *КОМАНДА КИКА ОТПРАВЛЕНА*\n\nЗапрос на кик вашего аккаунта *${res.targetUsername}* отправлен на сервер.`
+      : `👢 *КОМАНДА КИКА ОТПРАВЛЕНА АДМИНОМ*\n\nИгрок: *${res.targetUsername}*\nПричина: _${reason}_`;
 
-    await ctx.reply(`👢 *КОМАНДА КИКА ОТПРАВЛЕНА*\n\nИгрок: *${targetUsername}*\nПричина: _${reason}_`, { parse_mode: 'Markdown' });
+    await ctx.replyWithMarkdown(message);
   });
 
-  // 4. /mc_changepass <player> <newpassword>
+  // 4. /mc_changepass <newpassword> [player]
   bot.command('mc_changepass', async (ctx) => {
     const parts = ctx.message.text.trim().split(/\s+/);
-    if (parts.length < 3) {
-      return ctx.reply('⚠️ Использование: /mc_changepass <никнейм> <новый_пароль>');
+    if (parts.length < 2) {
+      return ctx.replyWithMarkdown('⚠️ *Использование:* `/mc_changepass <новый_пароль> [никнейм_для_админов]`');
     }
 
-    const targetUsername = parts[1].trim();
-    const newPassword = parts[2].trim();
+    const newPassword = parts[1].trim();
+    const inputPlayer = parts[2] ? parts[2].trim() : null;
 
-    const player = tgDb.getAuthPlayer(targetUsername);
-    if (!player) {
-      return ctx.reply(`❌ Игрок *${targetUsername}* не найден в базе данных.`, { parse_mode: 'Markdown' });
+    const res = resolveTargetPlayer(ctx, inputPlayer);
+    if (res.error) {
+      return ctx.replyWithMarkdown(res.error);
     }
 
     const newHash = hashPassword(newPassword);
-    player.password_hash = newHash;
-    tgDb.saveAuthPlayer(player);
+    res.player.password_hash = newHash;
+    tgDb.saveAuthPlayer(res.player);
 
-    sendCommandToPlugin('CHANGE_PASS', { username: player.username, newPasswordHash: newHash });
+    sendCommandToPlugin('CHANGE_PASS', { username: res.targetUsername, newPasswordHash: newHash });
 
-    await ctx.reply(`🔑 *ПАРОЛЬ УСПЕШНО ИЗМЕНЕН*\n\nАккаунт: *${player.display_name}*\nНовый пароль установлен.`, { parse_mode: 'Markdown' });
+    const message = res.isSelf
+      ? `🔑 *ВАШ ПАРОЛЬ УСПЕШНО ИЗМЕНЕН*\n\nПароль от вашего аккаунта *${res.targetUsername}* был обновлен.`
+      : `🔑 *ПАРОЛЬ ИГРОКА ИЗМЕНЕН АДМИНОМ*\n\nАккаунт: *${res.targetUsername}*`;
+
+    await ctx.replyWithMarkdown(message);
   });
 
-  // 5. /mc_userinfo <player>
+  // 5. /mc_userinfo [player]
   bot.command('mc_userinfo', async (ctx) => {
     const parts = ctx.message.text.trim().split(/\s+/);
-    if (parts.length < 2) {
-      return ctx.reply('⚠️ Использование: /mc_userinfo <никнейм>');
+    const inputPlayer = parts[1] ? parts[1].trim() : null;
+
+    const res = resolveTargetPlayer(ctx, inputPlayer);
+    if (res.error) {
+      return ctx.replyWithMarkdown(res.error);
     }
 
-    const targetUsername = parts[1].trim();
-    const player = tgDb.getAuthPlayer(targetUsername);
-
-    if (!player) {
-      return ctx.reply(`❌ Игрок *${targetUsername}* не найден в базе данных.`, { parse_mode: 'Markdown' });
-    }
+    const player = res.player;
 
     const infoText = `📋 *ПРОФИЛЬ ИГРОКА MINECRAFT*\n\n` +
-      `👤 *Никнейм:* \`${player.display_name}\`\n` +
+      `👤 *Никнейм:* \`${player.display_name || res.targetUsername}\`\n` +
       `🌐 *IP-Адрес:* \`${player.ip_address || '127.0.0.1'}\`\n` +
       `🛡️ *2FA Статус:* ${player.is_2fa_enabled ? '✅ Включена' : '❌ Отключена'}\n` +
       `❄️ *Заморозка:* ${player.is_frozen ? '❄️ Заморожен' : '🟢 Активен'}\n` +
-      `💬 *Telegram ID:* \`${player.telegram_id || 'Не привязан'}\`\n` +
-      `📅 *Регистрация:* ${new Date(player.registration_date || Date.now()).toLocaleString('ru-RU')}\n` +
-      `🕒 *Последний вход:* ${new Date(player.last_login || Date.now()).toLocaleString('ru-RU')}`;
+      `📅 *Регистрация:* ${new Date(player.registration_date || Date.now()).toLocaleString('ru-RU')}`;
 
-    await ctx.reply(infoText, { parse_mode: 'Markdown' });
+    await ctx.replyWithMarkdown(infoText);
   });
 
   // 6. /admin Interactive Panel
@@ -124,13 +168,9 @@ export function registerAdminCommands(bot) {
       `📊 *Всего игроков в БД:* ${allPlayers.length}\n` +
       `🛡️ *Игроков с 2FA:* ${faCount}\n` +
       `❄️ *Замороженных аккаунтов:* ${frozenCount}\n\n` +
-      `Доступные команды:\n` +
-      `• /mc_userinfo <ник>\n` +
-      `• /mc_freeze <ник> [причина]\n` +
-      `• /mc_unfreeze <ник>\n` +
-      `• /mc_kick <ник> [причина]\n` +
-      `• /mc_changepass <ник> <пароль>`;
+      `Игроки могут управлять своим аккаунтом (`/mc_kick`, `/mc_freeze`, `/mc_unfreeze`, `/mc_changepass`).\n` +
+      `Администраторы могут управлять другими игроками.`;
 
-    await ctx.reply(adminText, { parse_mode: 'Markdown' });
+    await ctx.replyWithMarkdown(adminText);
   });
 }
